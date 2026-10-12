@@ -1,8 +1,8 @@
-# ☀️ Solar Panel Underperformance & Revenue Loss Detector
+# ☀️ HelioPulse OS — Solar Inverter Anomaly & Revenue Loss Analytics Platform
 
-An end-to-end Machine Learning and Financial Analytics system designed for solar farm and rooftop operators in sunny, dust-prone regions (such as Rajasthan, India).
+An end-to-end Machine Learning, DuckDB-powered Telemetry Engine, and Financial Analytics system designed for solar farm and rooftop operators in sunny, dust-prone regions (such as Rajasthan, India).
 
-The system continuously forecasts **expected solar AC power** from meteorological sensor feeds (solar irradiation, ambient and module temperatures), identifies **inverter-level underperformance and electrical tripping anomalies**, and translates technical deficits directly into **rupee (₹) revenue losses and prioritized maintenance action cards**.
+The system continuously forecasts **expected solar AC power** from meteorological sensor feeds (solar irradiation, ambient and module temperatures), identifies **inverter-level underperformance and electrical tripping anomalies**, and translates technical deficits directly into **rupee (₹) revenue losses and prioritized maintenance action cards with calculated ROI**.
 
 ---
 
@@ -10,7 +10,7 @@ The system continuously forecasts **expected solar AC power** from meteorologica
 
 Most industrial solar analytics dashboards show raw kilowatt-hour plots or generic percentage efficiency drops. This tool answers the commercial question that plant managers care about:
 
-> **"Inverter 11 is underperforming by 8.9%, costing ₹1,09,297 this month. Cleaning the panel string costs ₹500, delivering a net ROI of +₹1,08,797."**
+> **"Inverter 11 is underperforming by 8.9%, costing ₹1,09,297 this month. Cleaning the panel string costs ₹500, delivering a net ROI of +₹1,08,797 (200x ROI)."**
 
 It bridges the gap between predictive ML modeling and concrete on-ground operations (washing panels vs inspecting tripped circuit breakers).
 
@@ -22,17 +22,30 @@ It bridges the gap between predictive ML modeling and concrete on-ground operati
 solar panel underperformance analyser/
 ├── data/
 │   ├── raw/                           # Raw Kaggle CSVs (Plant 1 & 2 Generation + Weather)
-│   └── processed/                     # Cleaned, merged feature datasets
+│   ├── sample_datasets/               # 5 Pre-generated synthetic test scenarios
+│   │   ├── 1_Rooftop_Jaipur_Soiling_30D.csv
+│   │   ├── 2_Bhadla_Desert_Tripping_45D.csv
+│   │   ├── 3_AgriPV_Jodhpur_Generation_Stream.csv
+│   │   ├── 3_AgriPV_Jodhpur_Weather_Sensor.csv
+│   │   ├── 4_Bhiwadi_Industrial_Faults_25D.csv
+│   │   └── 5_Neemrana_Clean_Benchmark_30D.csv
+│   └── solar_analytics.duckdb         # Embedded zero-config SQL database
 ├── models/
-│   ├── expected_power_plant_1.joblib  # Trained LightGBM regressor for Plant 1
-│   └── expected_power_plant_2.joblib  # Trained LightGBM regressor for Plant 2
+│   ├── expected_power_plant_1.joblib  # Plant-specific trained LightGBM models
+│   └── expected_power_plant_2.joblib
 ├── src/
+│   ├── db.py                          # Embedded DuckDB engine for telemetry & audit logs
+│   ├── uploader.py                    # Intelligent column mapping, dual-file merger, date parser
 │   ├── data_loader.py                 # Timestamp parsing, daylight tagging, data merging
 │   ├── features.py                    # Solar angles, temperature differentials, interactions
-│   ├── model.py                       # LightGBM regressor training, evaluation, inference
-│   ├── detector.py                    # PR calculation, anomaly classification (tripping vs soiling)
-│   └── financial_loss.py              # Energy deficit (kWh) to INR (₹) loss engine & ROI
-├── app.py                             # Interactive Streamlit Web Dashboard
+│   ├── model.py                       # Plant-adaptive LightGBM regressor training & inference
+│   ├── detector.py                    # Adaptive PR calculation, tripping vs soiling classifier
+│   └── financial_loss.py              # Auto-interval sampling, kWh to INR (₹) loss engine & ROI
+├── tests/
+│   └── test_pipeline.py               # Automated end-to-end QA verification suite
+├── scripts/
+│   └── generate_sample_datasets.py    # Synthetic real-world dataset generator
+├── app.py                             # Bespoke Industrial Streamlit Web Dashboard
 ├── requirements.txt
 └── README.md
 ```
@@ -46,37 +59,35 @@ solar panel underperformance analyser/
    pip install -r requirements.txt
    ```
 
-2. Launch the Streamlit dashboard:
+2. Run automated verification suite:
+   ```bash
+   python tests/test_pipeline.py
+   ```
+
+3. Launch the dashboard:
    ```bash
    streamlit run app.py
    ```
 
-3. Open your browser at `http://localhost:8501`.
+4. Open your browser at `http://localhost:8501`.
 
 ---
 
-## 🧠 Methodology & ML Pipeline
+## 🧠 Key Technical Highlights
 
-1. **Weather-Driven Expected Power Model**:
-   - Uses a **LightGBM Regressor** trained on operational daylight periods to establish nominal capacity.
-   - Inputs: Solar Irradiation ($kW/m^2$), Module Temperature (°C), Ambient Temperature (°C), Temperature Differential ($\Delta T$), Cyclical Solar Hour ($\sin / \cos$), and non-linear saturation terms.
-   - **Performance**: Test $R^2 \approx 0.978$, MAE $\approx 30.68\text{ kW}$ on Plant 1.
+1. **Plant-Specific Dynamic LightGBM Regressors**:
+   - Automatically adapts to any inverter scale (from 10 kW residential systems to 100 MW utility plants).
+   - Dynamically learns healthy nominal capacity ($R^2 \ge 0.97 - 0.99$).
+   - Models are cached specifically per plant (`expected_power_{plant_id}.joblib`).
 
-2. **Fault Disambiguation**:
-   - **Critical Inverter Trip / Breaker Drop**: Sun is high ($>0.05\text{ kW/m}^2$) but power output $< 5\text{ kW}$.
-   - **Severe String / Electrical Deficit**: Performance Ratio ($PR < 60\%$).
-   - **Soiling & Dust Accumulation**: Consistent deficit ($60\% \le PR < 88\%$).
-   - **Optimal Health**: $PR \ge 88\%$.
+2. **Adaptive Interval Detection**:
+   - Detects the sampling interval (5m, 10m, 15m, 30m, 60m) from telemetry timestamps instead of hardcoding time intervals.
 
-3. **Financial Quantification**:
-   $$\text{Energy Deficit (kWh)} = \max(\text{Expected AC Power} - \text{Actual AC Power}, 0) \times 0.25\text{ hr}$$
-   $$\text{Financial Loss (₹)} = \text{Energy Deficit (kWh)} \times \text{Tariff Rate (₹/kWh)}$$
-   $$\text{Maintenance Net ROI (₹)} = \text{Recoverable Soiling Loss} - \text{Cleaning Cost}$$
+3. **Fault Disambiguation**:
+   - **Critical Inverter Trip / Breaker Drop**: Sun is high but power output near zero.
+   - **Soiling & Dust Accumulation**: Consistent operational deficit ($60\% \le PR < 88\%$).
+   - **Severe String Fault / Disconnection**: Persistent $PR < 60\%$.
+   - **Optimal Operation**: $PR \ge 88\%$.
 
----
-
-## 📊 Dataset & Limitations
-
-- **Source**: Kaggle *"Solar Power Generation Data"* (two Indian solar power plants with 22 inverters each, 15-minute readings).
-- **Observation Window**: ~34 days (May 15, 2020 – June 17, 2020).
-- **Limitation & Future Scope**: Multi-month seasonal dust accumulation and monsoon wash cycles represent valuable future work; this project focuses on inverter-level fault detection and operational loss quantification.
+4. **Embedded DuckDB Storage**:
+   - Zero background services required. Telemetry, plants, and audit snapshots are persisted in `data/solar_analytics.duckdb`.

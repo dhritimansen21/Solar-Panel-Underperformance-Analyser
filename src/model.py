@@ -1,9 +1,11 @@
 """
 model.py
 Trains and evaluates regression models to predict expected solar AC power output from weather metrics.
+Supports dynamic plant sizing (from 10 kW rooftop arrays to 100 MW utility plants).
 """
 
 from pathlib import Path
+import re
 import joblib
 import numpy as np
 import pandas as pd
@@ -17,27 +19,45 @@ MODEL_DIR = Path(r"D:\solar panel underperformance analyser\models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _clean_plant_id(plant_id: str | int) -> str:
+    """Returns safe filename string for plant models."""
+    return re.sub(r'[^a-zA-Z0-9_]', '_', str(plant_id)).lower()
+
+
 def train_expected_power_model(
     df: pd.DataFrame,
-    plant_num: int = 1,
+    plant_id: str | int = "plant_1",
     save_model: bool = True
 ) -> tuple[lgb.LGBMRegressor, dict, pd.DataFrame]:
     """
     Trains a LightGBM regressor on operational daylight intervals to learn healthy nominal capacity.
-    Returns:
-        model: Trained LightGBM regressor
-        metrics: Dictionary with R2, MAE, RMSE for train and test splits
-        feature_importance_df: DataFrame of features and their importance values
+    Dynamically scales operational power threshold to fit the plant's actual inverter capacities.
     """
-    # Filter for operational daylight hours so anomalies/failures don't pull the baseline down
-    operational_mask = (df['IRRADIATION'] > 0.01) & (df['AC_POWER'] > 10.0)
+    clean_id = _clean_plant_id(plant_id)
+
+    # Calculate dynamic operational cutoff:
+    # Uses 5% of the 95th percentile AC power so residential/commercial/utility scales all work
+    peak_ac = float(df['AC_POWER'].quantile(0.95)) if len(df) > 0 else 100.0
+    min_operational_power = max(0.5, 0.05 * peak_ac)
+
+    operational_mask = (df['IRRADIATION'] > 0.01) & (df['AC_POWER'] > min_operational_power)
     train_data = df[operational_mask].copy()
+
+    # Fallback if too few records are selected
+    if len(train_data) < 40:
+        fallback_mask = (df['IRRADIATION'] > 0.005) & (df['AC_POWER'] > 0.0)
+        train_data = df[fallback_mask].copy()
+
+    if len(train_data) < 20:
+        # Ultimate fallback on daylight
+        train_data = df[df['IRRADIATION'] > 0.005].copy()
 
     X = train_data[FEATURE_COLUMNS]
     y = train_data[TARGET_COLUMN]
 
+    test_size = 0.2 if len(train_data) >= 100 else 0.1
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=test_size, random_state=42
     )
 
     model = lgb.LGBMRegressor(
@@ -52,7 +72,6 @@ def train_expected_power_model(
     )
     model.fit(X_train, y_train)
 
-    # Evaluate
     y_train_pred = model.predict(X_train)
     y_test_pred = model.predict(X_test)
 
@@ -71,37 +90,46 @@ def train_expected_power_model(
     }).sort_values('Importance', ascending=False).reset_index(drop=True)
 
     if save_model:
-        model_path = MODEL_DIR / f"expected_power_plant_{plant_num}.joblib"
+        model_path = MODEL_DIR / f"expected_power_{clean_id}.joblib"
         joblib.dump(model, model_path)
 
     return model, metrics, feature_importance_df
 
 
-def load_or_train_model(df: pd.DataFrame, plant_num: int = 1) -> tuple[lgb.LGBMRegressor, dict, pd.DataFrame]:
+def load_or_train_model(df: pd.DataFrame, plant_id: str | int = "plant_1") -> tuple[lgb.LGBMRegressor, dict, pd.DataFrame]:
     """
-    Loads saved model if available, otherwise trains and saves a new one.
+    Loads saved model if available for this specific plant_id, otherwise trains and saves a new one.
     """
-    model_path = MODEL_DIR / f"expected_power_plant_{plant_num}.joblib"
+    clean_id = _clean_plant_id(plant_id)
+    model_path = MODEL_DIR / f"expected_power_{clean_id}.joblib"
+
     if model_path.exists():
-        model = joblib.load(model_path)
-        # Evaluate quick test metrics
-        operational_mask = (df['IRRADIATION'] > 0.01) & (df['AC_POWER'] > 10.0)
-        eval_data = df[operational_mask]
-        X = eval_data[FEATURE_COLUMNS]
-        y = eval_data[TARGET_COLUMN]
-        y_pred = model.predict(X)
-        metrics = {
-            "test_r2": float(r2_score(y, y_pred)),
-            "test_mae": float(mean_absolute_error(y, y_pred)),
-            "test_rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
-        }
-        feature_importance_df = pd.DataFrame({
-            'Feature': FEATURE_COLUMNS,
-            'Importance': model.feature_importances_
-        }).sort_values('Importance', ascending=False).reset_index(drop=True)
-        return model, metrics, feature_importance_df
+        try:
+            model = joblib.load(model_path)
+            peak_ac = float(df['AC_POWER'].quantile(0.95)) if len(df) > 0 else 100.0
+            min_operational_power = max(0.5, 0.05 * peak_ac)
+            eval_data = df[(df['IRRADIATION'] > 0.01) & (df['AC_POWER'] > min_operational_power)]
+            if len(eval_data) < 20:
+                eval_data = df[df['IRRADIATION'] > 0.005]
+
+            X = eval_data[FEATURE_COLUMNS]
+            y = eval_data[TARGET_COLUMN]
+            y_pred = model.predict(X)
+            metrics = {
+                "test_r2": float(r2_score(y, y_pred)),
+                "test_mae": float(mean_absolute_error(y, y_pred)),
+                "test_rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
+            }
+            feature_importance_df = pd.DataFrame({
+                'Feature': FEATURE_COLUMNS,
+                'Importance': model.feature_importances_
+            }).sort_values('Importance', ascending=False).reset_index(drop=True)
+            return model, metrics, feature_importance_df
+        except Exception:
+            # Re-train if corrupted or schema changed
+            return train_expected_power_model(df, plant_id=plant_id, save_model=True)
     else:
-        return train_expected_power_model(df, plant_num=plant_num, save_model=True)
+        return train_expected_power_model(df, plant_id=plant_id, save_model=True)
 
 
 def predict_expected_power(model: lgb.LGBMRegressor, df: pd.DataFrame) -> np.ndarray:
@@ -117,16 +145,3 @@ def predict_expected_power(model: lgb.LGBMRegressor, df: pd.DataFrame) -> np.nda
     predictions[night_mask] = 0.0
 
     return predictions
-
-
-if __name__ == "__main__":
-    from src.data_loader import merge_and_clean_data
-    from src.features import add_solar_features
-
-    for p in [1, 2]:
-        print(f"\nTraining model for Plant {p}...")
-        raw_df = merge_and_clean_data(p)
-        featured_df = add_solar_features(raw_df)
-        mod, mets, fi = train_expected_power_model(featured_df, plant_num=p)
-        print(f"Plant {p} Test R2: {mets['test_r2']:.4f}, MAE: {mets['test_mae']:.2f} kW, RMSE: {mets['test_rmse']:.2f} kW")
-        print("Top 3 Features:\n", fi.head(3))

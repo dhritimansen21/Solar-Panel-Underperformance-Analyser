@@ -21,6 +21,23 @@ STANDARD_COLUMNS = {
 }
 
 
+def parse_flexible_datetime(series: pd.Series) -> pd.Series:
+    """
+    Intelligently parses timestamps whether they are ISO (YYYY-MM-DD) or dayfirst (DD-MM-YYYY).
+    Prevents corrupting ISO dates into NaTs when day > 12.
+    """
+    clean_series = series.dropna()
+    if len(clean_series) == 0:
+        return pd.to_datetime(series, errors='coerce')
+
+    sample = str(clean_series.iloc[0]).strip()
+    # If sample starts with 4-digit year followed by dash or slash (YYYY-MM-DD)
+    if len(sample) >= 4 and sample[:4].isdigit() and ('-' in sample[:5] or '/' in sample[:5]):
+        return pd.to_datetime(series, format='mixed', errors='coerce')
+    else:
+        return pd.to_datetime(series, format='mixed', dayfirst=True, errors='coerce')
+
+
 def guess_column_mapping(df_columns: list[str]) -> dict[str, str | None]:
     """
     Intelligently guesses standard column associations from raw column headers.
@@ -53,14 +70,12 @@ def process_and_ingest_uploaded_df(
     Applies column mappings, parses dates, scales units, and saves to DuckDB.
     Returns: (success, message, row_count)
     """
-    # Verify required mappings
     required = ['DATE_TIME', 'SOURCE_KEY', 'AC_POWER', 'IRRADIATION', 'MODULE_TEMPERATURE', 'AMBIENT_TEMPERATURE']
     missing = [col for col in required if not col_mapping.get(col)]
     if missing:
         return False, f"Missing required column mappings for: {', '.join(missing)}", 0
 
     try:
-        # Create standardized dataframe
         standard_df = pd.DataFrame()
         for std_col in required:
             raw_col = col_mapping[std_col]
@@ -69,7 +84,7 @@ def process_and_ingest_uploaded_df(
             standard_df[std_col] = df[raw_col]
 
         # Parse timestamps flexibly
-        standard_df['DATE_TIME'] = pd.to_datetime(standard_df['DATE_TIME'], dayfirst=True, errors='coerce')
+        standard_df['DATE_TIME'] = parse_flexible_datetime(standard_df['DATE_TIME'])
         standard_df = standard_df.dropna(subset=['DATE_TIME'])
 
         if len(standard_df) == 0:
@@ -85,6 +100,9 @@ def process_and_ingest_uploaded_df(
             standard_df['IRRADIATION'] = standard_df['IRRADIATION'] / 1000.0
 
         standard_df['SOURCE_KEY'] = standard_df['SOURCE_KEY'].astype(str)
+
+        # Deduplicate to prevent DB primary key conflicts
+        standard_df = standard_df.drop_duplicates(subset=['DATE_TIME', 'SOURCE_KEY'])
 
         # Optional extra fields
         standard_df['DC_POWER'] = standard_df['AC_POWER'] * 1.02
@@ -119,10 +137,16 @@ def process_dual_files_upload(
         gen_df = gen_df.copy()
         weather_df = weather_df.copy()
 
-        gen_df['NORM_DT'] = pd.to_datetime(gen_df[gen_time_col], dayfirst=True, errors='coerce')
-        weather_df['NORM_DT'] = pd.to_datetime(weather_df[weather_time_col], dayfirst=True, errors='coerce')
+        gen_df['NORM_DT'] = parse_flexible_datetime(gen_df[gen_time_col])
+        weather_df['NORM_DT'] = parse_flexible_datetime(weather_df[weather_time_col])
 
-        merged = pd.merge(gen_df, weather_df, on='NORM_DT', how='inner')
+        gen_df = gen_df.dropna(subset=['NORM_DT'])
+        weather_df = weather_df.dropna(subset=['NORM_DT'])
+
+        # Drop duplicate weather timestamps if weather is plant-level
+        weather_dedup = weather_df.drop_duplicates(subset=['NORM_DT'])
+
+        merged = pd.merge(gen_df, weather_dedup, on='NORM_DT', how='inner')
         if len(merged) == 0:
             return False, "No timestamp matches found between generation and weather files.", 0
 
@@ -137,6 +161,8 @@ def process_dual_files_upload(
 
         if merged_clean['IRRADIATION'].max() > 20.0:
             merged_clean['IRRADIATION'] = merged_clean['IRRADIATION'] / 1000.0
+
+        merged_clean = merged_clean.drop_duplicates(subset=['DATE_TIME', 'SOURCE_KEY'])
 
         merged_clean['DC_POWER'] = merged_clean['AC_POWER'] * 1.02
         merged_clean['DAILY_YIELD'] = 0.0

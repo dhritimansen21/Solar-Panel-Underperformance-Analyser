@@ -348,8 +348,9 @@ if plant_mode == "upload_custom":
             sample_options = {
                 "1_Rooftop_Jaipur_Soiling_30D.csv": ("sample_jaipur_soiling", "1. Rooftop Jaipur (30 Days - Progressive Dust/Soiling Accumulation)"),
                 "2_Bhadla_Desert_Tripping_45D.csv": ("sample_bhadla_tripping", "2. Bhadla Desert Solar Park (45 Days - Midday Thermal Tripping & Outages)"),
-                "4_Bhiwadi_Industrial_Faults_25D.csv": ("sample_bhiwadi_faults", "3. Bhiwadi Industrial (25 Days - String Fuse Blow & Obstruction Shading)"),
-                "5_Neemrana_Clean_Benchmark_30D.csv": ("sample_neemrana_clean", "4. Neemrana Benchmark (30 Days - Optimal Robotic Cleaned Reference)")
+                "3_AgriPV_Jodhpur_DualFile": ("sample_agripv_jodhpur", "3. AgriPV Jodhpur (21 Days - Dual-File Merge & Crop Dusting)"),
+                "4_Bhiwadi_Industrial_Faults_25D.csv": ("sample_bhiwadi_faults", "4. Bhiwadi Industrial (25 Days - String Fuse Blow & Obstruction Shading)"),
+                "5_Neemrana_Clean_Benchmark_30D.csv": ("sample_neemrana_clean", "5. Neemrana Benchmark (30 Days - Optimal Robotic Cleaned Reference)")
             }
             chosen_sample = st.selectbox(
                 "Choose Scenario:",
@@ -360,18 +361,33 @@ if plant_mode == "upload_custom":
             with col_inj1:
                 if st.button("⚡ Inject Scenario into Database", type="primary"):
                     with st.spinner("Ingesting into DuckDB..."):
-                        s_path = sample_dir / chosen_sample
-                        s_df = pd.read_csv(s_path)
                         s_pid, s_pname = sample_options[chosen_sample]
-                        s_mapping = guess_column_mapping(list(s_df.columns))
-                        ok, msg, cnt = process_and_ingest_uploaded_df(s_df, s_pid, s_pname, s_mapping)
+                        if chosen_sample == "3_AgriPV_Jodhpur_DualFile":
+                            # Merge dual files
+                            g_path = sample_dir / "3_AgriPV_Jodhpur_Generation_Stream.csv"
+                            w_path = sample_dir / "3_AgriPV_Jodhpur_Weather_Sensor.csv"
+                            gdf = pd.read_csv(g_path)
+                            wdf = pd.read_csv(w_path)
+                            ok, msg, cnt = process_dual_files_upload(
+                                gdf, wdf, s_pid, s_pname,
+                                gen_time_col='timestamp', weather_time_col='timestamp',
+                                inv_col='inverter_serial', power_col='active_generation_kw',
+                                irrad_col='ghi_flux_w_m2', mod_temp_col='pv_surface_temp_c',
+                                amb_temp_col='air_temperature_c'
+                            )
+                        else:
+                            s_path = sample_dir / chosen_sample
+                            s_df = pd.read_csv(s_path)
+                            s_mapping = guess_column_mapping(list(s_df.columns))
+                            ok, msg, cnt = process_and_ingest_uploaded_df(s_df, s_pid, s_pname, s_mapping)
+
                         if ok:
                             st.success(f"🎉 {msg}")
                             st.rerun()
                         else:
                             st.error(f"❌ {msg}")
             with col_inj2:
-                st.caption(f"📁 Source file: `data/sample_datasets/{chosen_sample}`. (Note: Scenario #3 AgriPV dual-file is available below in dual-file mode).")
+                st.caption(f"📁 Source: `data/sample_datasets/` &bull; Click to inject and run ML modeling immediately.")
 
     upload_type = st.radio(
         "Manual Upload Mode:",
@@ -519,9 +535,8 @@ def load_and_model_plant(plant_id: str):
     # Feature engineering
     featured_df = add_solar_features(df_raw)
 
-    # Extract numerical plant index if Kaggle plant, else fallback to 1
-    plant_num = 2 if "plant_2" in plant_id else 1
-    model, metrics, feat_importance = load_or_train_model(featured_df, plant_num=plant_num)
+    # Train/load plant-specific regression baseline
+    model, metrics, feat_importance = load_or_train_model(featured_df, plant_id=plant_id)
 
     featured_df['EXPECTED_AC_POWER'] = predict_expected_power(model, featured_df)
     return featured_df, metrics, feat_importance
@@ -551,7 +566,14 @@ date_range = st.sidebar.date_input(
 if isinstance(date_range, tuple) and len(date_range) == 2:
     start_d, end_d = date_range
     active_df = telemetry_df[(telemetry_df['DATE'] >= start_d) & (telemetry_df['DATE'] <= end_d)].copy()
+elif isinstance(date_range, tuple) and len(date_range) == 1:
+    single_d = date_range[0]
+    active_df = telemetry_df[telemetry_df['DATE'] == single_d].copy()
 else:
+    active_df = telemetry_df.copy()
+
+if len(active_df) == 0:
+    st.warning("Selected date range returned 0 records. Displaying full date range.")
     active_df = telemetry_df.copy()
 
 
