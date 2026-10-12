@@ -15,7 +15,8 @@ import lightgbm as lgb
 
 from src.features import FEATURE_COLUMNS, TARGET_COLUMN
 
-MODEL_DIR = Path(r"D:\solar panel underperformance analyser\models")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODEL_DIR = PROJECT_ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 

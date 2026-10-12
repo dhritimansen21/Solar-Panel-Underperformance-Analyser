@@ -2,15 +2,19 @@
 db.py
 Embedded DuckDB storage engine for solar plant telemetry, uploaded datasets, and audit logs.
 Provides persistent zero-setup local database capabilities.
+Cross-platform compatible (Windows, Linux, Docker, Streamlit Cloud).
 """
 
 from pathlib import Path
 from datetime import datetime
+import shutil
 import duckdb
 import pandas as pd
 
-DB_PATH = Path(r"D:\solar panel underperformance analyser\data\solar_analytics.duckdb")
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "solar_analytics.duckdb"
 
 
 def get_connection():
@@ -19,7 +23,7 @@ def get_connection():
 
 
 def init_db():
-    """Initializes schema tables if they do not exist."""
+    """Initializes schema tables if they do not exist and auto-seeds default plants."""
     con = get_connection()
     try:
         con.execute("""
@@ -67,6 +71,70 @@ def init_db():
     finally:
         con.close()
 
+    # Automatically seed Kaggle plants if this is a fresh database
+    seed_default_plants_if_needed()
+
+
+def seed_default_plants_if_needed(force_reseed: bool = False):
+    """
+    Ensures Plant 1 and Plant 2 are present in DuckDB.
+    If missing (e.g. on fresh Streamlit Cloud deployment), auto-downloads Kaggle CSVs
+    and seeds them into the database automatically.
+    """
+    existing_plants = list_plants()
+    existing_ids = {p['plant_id'] for p in existing_plants}
+
+    needs_plant1 = force_reseed or ('plant_1' not in existing_ids)
+    needs_plant2 = force_reseed or ('plant_2' not in existing_ids)
+
+    if not needs_plant1 and not needs_plant2:
+        return
+
+    raw_dir = DATA_DIR / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    required_files = [
+        raw_dir / "Plant_1_Generation_Data.csv",
+        raw_dir / "Plant_1_Weather_Sensor_Data.csv",
+        raw_dir / "Plant_2_Generation_Data.csv",
+        raw_dir / "Plant_2_Weather_Sensor_Data.csv"
+    ]
+
+    # If raw CSVs are missing, attempt automatic download via kagglehub
+    if not all(f.exists() for f in required_files):
+        try:
+            import kagglehub
+            print("[INFO] Raw Kaggle dataset files missing. Downloading via kagglehub...")
+            download_dir = Path(kagglehub.dataset_download("anikannal/solar-power-generation-data"))
+            for csv_f in download_dir.glob("*.csv"):
+                shutil.copy(csv_f, raw_dir / csv_f.name)
+            print("[INFO] Successfully downloaded Kaggle dataset to data/raw/")
+        except Exception as e:
+            print(f"[WARNING] Could not auto-download Kaggle dataset: {e}")
+
+    # Import data loader
+    from src.data_loader import merge_and_clean_data
+
+    # Seed Plant 1
+    if needs_plant1 and (raw_dir / "Plant_1_Generation_Data.csv").exists():
+        try:
+            print("[INFO] Seeding Plant 1 into DuckDB...")
+            df1 = merge_and_clean_data(1, data_dir=raw_dir)
+            save_plant_telemetry('plant_1', 'Kaggle Plant 1 (Soiling & Inverter Variations)', df1, source_type='kaggle')
+            print("[INFO] Plant 1 seeded successfully.")
+        except Exception as e:
+            print(f"[ERROR] Failed to seed Plant 1: {e}")
+
+    # Seed Plant 2
+    if needs_plant2 and (raw_dir / "Plant_2_Generation_Data.csv").exists():
+        try:
+            print("[INFO] Seeding Plant 2 into DuckDB...")
+            df2 = merge_and_clean_data(2, data_dir=raw_dir)
+            save_plant_telemetry('plant_2', 'Kaggle Plant 2 (Severe Outages & Downtime)', df2, source_type='kaggle')
+            print("[INFO] Plant 2 seeded successfully.")
+        except Exception as e:
+            print(f"[ERROR] Failed to seed Plant 2: {e}")
+
 
 def save_plant_telemetry(
     plant_id: str,
@@ -103,6 +171,9 @@ def save_plant_telemetry(
             'module_temp': df['MODULE_TEMPERATURE'].astype(float),
             'irradiation': df['IRRADIATION'].astype(float),
         })
+
+        # Deduplicate on composite primary key
+        telemetry_df = telemetry_df.drop_duplicates(subset=['plant_id', 'date_time', 'source_key'])
 
         # Remove existing telemetry for this plant to allow clean updates
         con.execute("DELETE FROM telemetry WHERE plant_id = ?", (plant_id,))

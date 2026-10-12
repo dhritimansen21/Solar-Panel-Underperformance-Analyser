@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-OUTPUT_DIR = Path(r"D:\solar panel underperformance analyser\data\sample_datasets")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = PROJECT_ROOT / "data" / "sample_datasets"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

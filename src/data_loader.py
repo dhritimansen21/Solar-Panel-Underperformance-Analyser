@@ -8,7 +8,8 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-DEFAULT_DATA_DIR = Path(r"D:\solar panel underperformance analyser\data\raw")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 
 
 def load_raw_data(plant_num: int = 1, data_dir: Path = DEFAULT_DATA_DIR) -> tuple[pd.DataFrame, pd.DataFrame]:

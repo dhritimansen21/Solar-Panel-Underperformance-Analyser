@@ -25,10 +25,12 @@ from src.db import (
     load_plant_telemetry,
     save_audit_log,
     get_audit_history,
-    delete_plant
+    delete_plant,
+    seed_default_plants_if_needed
 )
 from src.uploader import (
     guess_column_mapping,
+    find_best_column_match,
     process_and_ingest_uploaded_df,
     process_dual_files_upload,
     STANDARD_COLUMNS
@@ -277,6 +279,10 @@ st.sidebar.markdown("### 🎛️ Data Stream & Source")
 
 # Fetch available plants from DuckDB
 available_plants = list_plants()
+if len(available_plants) == 0:
+    seed_default_plants_if_needed()
+    available_plants = list_plants()
+
 plant_options = {p['plant_id']: p['plant_name'] for p in available_plants}
 
 plant_mode = st.sidebar.radio(
@@ -338,9 +344,9 @@ if plant_mode == "upload_custom":
     )
 
     # Quick Inject Sample Expander
-    sample_dir = Path(r"D:\solar panel underperformance analyser\data\sample_datasets")
+    sample_dir = PROJECT_ROOT / "data" / "sample_datasets"
     if sample_dir.exists():
-        with st.expander("🧪 Quick-Inject One of 5 Pre-Generated Scenarios into DuckDB", expanded=True):
+        with st.expander("🧪 Quick-Inject One of 5 Pre-Generated Scenarios into DuckDB", expanded=False):
             st.markdown(
                 "Five synthetic datasets have been generated with distinct real-world failure patterns. "
                 "Select one below to inject it directly into DuckDB with one click, or upload your own files below."
@@ -389,6 +395,22 @@ if plant_mode == "upload_custom":
             with col_inj2:
                 st.caption(f"📁 Source: `data/sample_datasets/` &bull; Click to inject and run ML modeling immediately.")
 
+    # Kaggle Auto-Restore Expander
+    with st.expander("🔄 Auto-Restore Official Kaggle Datasets (Plant 1 & Plant 2)", expanded=True):
+        st.markdown(
+            "If you are deploying in a fresh cloud container (e.g. Streamlit Cloud) or your local database was reset, "
+            "click below to download and restore the official Kaggle benchmark datasets into DuckDB automatically."
+        )
+        col_res1, col_res2 = st.columns([2, 3])
+        with col_res1:
+            if st.button("🚀 Restore Kaggle Plant 1 & Plant 2", type="secondary"):
+                with st.spinner("Downloading and restoring Kaggle datasets into DuckDB..."):
+                    seed_default_plants_if_needed(force_reseed=True)
+                    st.success("Successfully restored Kaggle Plant 1 and Plant 2!")
+                    st.rerun()
+        with col_res2:
+            st.caption("Downloads official Kaggle files and pre-loads both plants into DuckDB with all telemetry tables.")
+
     upload_type = st.radio(
         "Manual Upload Mode:",
         options=["single_unified", "dual_files"],
@@ -431,6 +453,14 @@ if plant_mode == "upload_custom":
                 # Replace '-- None --' with None
                 clean_mapping = {k: (v if v != "-- None --" else None) for k, v in mapped_cols.items()}
 
+                missing_essentials = [k for k in ['IRRADIATION', 'MODULE_TEMPERATURE'] if not clean_mapping.get(k)]
+                if missing_essentials:
+                    st.warning(
+                        "💡 **Notice for Kaggle Datasets:** The standard Kaggle dataset splits telemetry into separate "
+                        "Generation (`Plant_X_Generation_Data.csv`) and Weather (`Plant_X_Weather_Sensor_Data.csv`) files. "
+                        "If you are uploading Kaggle data, select **'Separate Generation & Weather Sensor CSVs'** above!"
+                    )
+
                 st.markdown("#### Sample Preview (First 5 Rows)")
                 st.dataframe(raw_df.head(5), use_container_width=True)
 
@@ -455,30 +485,61 @@ if plant_mode == "upload_custom":
         st.markdown("##### Upload Two Files (Generation & Weather)")
         c_up1, c_up2 = st.columns(2)
         with c_up1:
-            gen_f = st.file_uploader("1. Inverter Generation CSV:", type=["csv"])
+            gen_f = st.file_uploader("1. Inverter Generation CSV (e.g., Plant_1_Generation_Data.csv):", type=["csv"])
         with c_up2:
-            weather_f = st.file_uploader("2. Weather Sensor CSV:", type=["csv"])
+            weather_f = st.file_uploader("2. Weather Sensor CSV (e.g., Plant_1_Weather_Sensor_Data.csv):", type=["csv"])
 
         if gen_f and weather_f:
             gdf = pd.read_csv(gen_f)
             wdf = pd.read_csv(weather_f)
 
-            st.write(f"Generation File: {len(gdf)} rows | Weather File: {len(wdf)} rows")
+            g_cols = list(gdf.columns)
+            w_cols = list(wdf.columns)
+
+            def get_col_index(columns, patterns, fallback=0):
+                match = find_best_column_match(columns, patterns)
+                if match and match in columns:
+                    return columns.index(match)
+                return fallback
+
+            # Auto-detect generation columns
+            g_dt_idx = get_col_index(g_cols, STANDARD_COLUMNS['DATE_TIME'])
+            g_inv_idx = get_col_index(g_cols, STANDARD_COLUMNS['SOURCE_KEY'])
+            g_ac_idx = get_col_index(g_cols, STANDARD_COLUMNS['AC_POWER'])
+
+            # Auto-detect weather columns
+            w_dt_idx = get_col_index(w_cols, STANDARD_COLUMNS['DATE_TIME'])
+            w_irr_idx = get_col_index(w_cols, STANDARD_COLUMNS['IRRADIATION'])
+            w_mod_idx = get_col_index(w_cols, STANDARD_COLUMNS['MODULE_TEMPERATURE'])
+            w_amb_idx = get_col_index(w_cols, STANDARD_COLUMNS['AMBIENT_TEMPERATURE'])
+
+            st.success(f"Loaded Generation file ({len(gdf):,} rows) and Weather file ({len(wdf):,} rows).")
+            st.markdown("#### Intelligent Dual-File Column Auto-Mapping")
+            st.caption("Fields below have been automatically matched with high-priority schema patterns:")
+
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("**Generation File Mapping:**")
-                g_dt = st.selectbox("Timestamp Column (Gen):", gdf.columns)
-                g_inv = st.selectbox("Inverter ID Column:", gdf.columns)
-                g_ac = st.selectbox("AC Power Column:", gdf.columns)
+                g_dt = st.selectbox("Timestamp Column (Gen) *", options=g_cols, index=g_dt_idx)
+                g_inv = st.selectbox("Inverter Identifier Column *", options=g_cols, index=g_inv_idx)
+                g_ac = st.selectbox("AC Active Power (kW) *", options=g_cols, index=g_ac_idx)
             with c2:
-                st.markdown("**Weather File Mapping:**")
-                w_dt = st.selectbox("Timestamp Column (Weather):", wdf.columns)
-                w_irr = st.selectbox("Irradiation Column:", wdf.columns)
-                w_mod = st.selectbox("Module Temp Column:", wdf.columns)
-                w_amb = st.selectbox("Ambient Temp Column:", wdf.columns)
+                st.markdown("**Weather Sensor Mapping:**")
+                w_dt = st.selectbox("Timestamp Column (Weather) *", options=w_cols, index=w_dt_idx)
+                w_irr = st.selectbox("Solar Irradiation Column *", options=w_cols, index=w_irr_idx)
+                w_mod = st.selectbox("Module Temperature (°C) *", options=w_cols, index=w_mod_idx)
+                w_amb = st.selectbox("Ambient Temperature (°C) *", options=w_cols, index=w_amb_idx)
+
+            p1, p2 = st.columns(2)
+            with p1:
+                st.markdown("**Generation Sample (Top 3 Rows):**")
+                st.dataframe(gdf.head(3), use_container_width=True)
+            with p2:
+                st.markdown("**Weather Sample (Top 3 Rows):**")
+                st.dataframe(wdf.head(3), use_container_width=True)
 
             if st.button("🚀 Merge & Ingest into DuckDB", type="primary"):
-                with st.spinner("Merging time streams and indexing into DuckDB..."):
+                with st.spinner("Aligning timestamps, normalizing units, and indexing into DuckDB..."):
                     ok, msg, count = process_dual_files_upload(
                         gdf, wdf,
                         plant_id=new_plant_id.strip(),
@@ -493,6 +554,7 @@ if plant_mode == "upload_custom":
                     )
                     if ok:
                         st.success(f"🎉 {msg}")
+                        st.info("You can now select this plant under 'Managed Solar Plants' in the sidebar!")
                         st.rerun()
                     else:
                         st.error(f"❌ {msg}")
