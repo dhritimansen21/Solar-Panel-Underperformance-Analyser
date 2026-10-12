@@ -13,6 +13,12 @@ def add_solar_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
+    # Automatically derive HOUR and MINUTE if not already present
+    if ('HOUR' not in df.columns or 'MINUTE' not in df.columns) and 'DATE_TIME' in df.columns:
+        dt = pd.to_datetime(df['DATE_TIME'])
+        df['HOUR'] = dt.dt.hour
+        df['MINUTE'] = dt.dt.minute
+
     # Continuous time of day (0.00 to 23.75)
     solar_time = df['HOUR'] + (df['MINUTE'] / 60.0)
     df['SOLAR_TIME'] = solar_time
